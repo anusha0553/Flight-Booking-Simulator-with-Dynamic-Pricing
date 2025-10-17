@@ -1,0 +1,148 @@
+-- Create Database
+CREATE DATABASE IF NOT EXISTS flight_booking;
+USE flight_booking;
+
+-- Drop tables if they already exist (for clean re-run)
+DROP TABLE IF EXISTS bookings;
+DROP TABLE IF EXISTS flights;
+DROP TABLE IF EXISTS airlines;
+
+-- ================================
+-- 1. AIRLINES TABLE
+-- ================================
+CREATE TABLE airlines (
+    airline_id INT AUTO_INCREMENT PRIMARY KEY,
+    airline_name VARCHAR(50) UNIQUE NOT NULL,
+    headquarters VARCHAR(50)
+);
+
+INSERT INTO airlines (airline_name, headquarters) VALUES
+('Air India', 'New Delhi'),
+('IndiGo', 'Gurugram'),
+('SpiceJet', 'Gurugram'),
+('Vistara', 'New Delhi');
+
+-- ================================
+-- 2. FLIGHTS TABLE
+-- ================================
+CREATE TABLE flights (
+    flight_id INT AUTO_INCREMENT PRIMARY KEY,
+    flight_no VARCHAR(10) UNIQUE NOT NULL,
+    airline_id INT NOT NULL,
+    origin VARCHAR(50) NOT NULL,
+    destination VARCHAR(50) NOT NULL,
+    departure DATETIME NOT NULL,
+    arrival DATETIME NOT NULL,
+    base_fare DECIMAL(10,2) CHECK (base_fare > 0),
+    total_seats INT CHECK (total_seats > 0),
+    seats_available INT CHECK (seats_available >= 0),
+    FOREIGN KEY (airline_id) REFERENCES airlines(airline_id)
+);
+
+INSERT INTO flights (flight_no, airline_id, origin, destination, departure, arrival, base_fare, total_seats, seats_available)
+VALUES
+('AI101', 1, 'Delhi', 'Mumbai', '2025-03-01 10:00:00', '2025-03-01 12:00:00', 8000.00, 200, 150),
+('AI102', 1, 'Mumbai', 'Delhi', '2025-03-01 15:00:00', '2025-03-01 17:00:00', 8200.00, 200, 180),
+('IG201', 2, 'Delhi', 'Chennai', '2025-03-02 08:00:00', '2025-03-02 10:30:00', 9000.00, 180, 170),
+('IG202', 2, 'Chennai', 'Delhi', '2025-03-02 14:00:00', '2025-03-02 16:30:00', 8800.00, 180, 160),
+('SJ301', 3, 'Mumbai', 'Kolkata', '2025-03-03 09:00:00', '2025-03-03 11:30:00', 7500.00, 150, 140),
+('VT401', 4, 'Bengaluru', 'Delhi', '2025-03-04 06:00:00', '2025-03-04 08:30:00', 9500.00, 220, 200);
+
+-- ================================
+-- 3. BOOKINGS TABLE
+-- ================================
+CREATE TABLE bookings (
+    booking_id INT AUTO_INCREMENT PRIMARY KEY,
+    flight_id INT NOT NULL,
+    passenger_name VARCHAR(50) NOT NULL,
+    seats_booked INT CHECK (seats_booked > 0),
+    booking_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    total_amount DECIMAL(10,2),
+    FOREIGN KEY (flight_id) REFERENCES flights(flight_id)
+);
+
+-- ================================
+-- 4. VIEWING DATA
+-- ================================
+SELECT * FROM airlines;
+SELECT * FROM flights;
+SELECT * FROM bookings;
+
+-- ================================
+-- 5. INNER JOIN (Flights + Airlines)
+-- ================================
+SELECT 
+    f.flight_no, 
+    a.airline_name, 
+    f.origin, 
+    f.destination, 
+    f.base_fare, 
+    f.seats_available
+FROM flights f
+INNER JOIN airlines a ON f.airline_id = a.airline_id;
+
+-- ================================
+-- 6. LEFT JOIN (All airlines even if no flights)
+-- ================================
+SELECT 
+    a.airline_name, 
+    f.flight_no, 
+    f.origin, 
+    f.destination
+FROM airlines a
+LEFT JOIN flights f ON a.airline_id = f.airline_id;
+
+-- ================================
+-- 7. RIGHT JOIN (All flights even if airline missing)
+-- ================================
+SELECT 
+    f.flight_no, 
+    a.airline_name, 
+    f.origin, 
+    f.destination
+FROM flights f
+RIGHT JOIN airlines a ON f.airline_id = a.airline_id;
+
+-- ================================
+-- 8. TRANSACTION EXAMPLE
+-- ================================
+START TRANSACTION;
+
+-- Step 1: Insert a booking
+INSERT INTO bookings (flight_id, passenger_name, seats_booked, total_amount)
+VALUES (1, 'Rahul Sharma', 2, 16000.00);
+
+-- Step 2: Reduce available seats in flights table
+UPDATE flights
+SET seats_available = seats_available - 2
+WHERE flight_id = 1;
+
+-- Step 3: Check constraint example — if seats become negative, rollback
+-- (This query is just for understanding)
+-- UPDATE flights SET seats_available = -10 WHERE flight_id = 1;
+
+-- If everything is fine, commit
+COMMIT;
+
+-- ================================
+-- 9. ROLLBACK DEMO
+-- ================================
+START TRANSACTION;
+INSERT INTO bookings (flight_id, passenger_name, seats_booked, total_amount)
+VALUES (3, 'Priya Verma', 4, 36000.00);
+
+-- Oops, decide to cancel
+ROLLBACK;
+
+-- ================================
+-- 10. CHECK RESULTS
+-- ================================
+SELECT * FROM bookings;
+SELECT flight_no, seats_available FROM flights;
+
+-- ================================
+-- 11. CONSTRAINT TEST (optional)
+-- ================================
+-- This will fail because base_fare < 0 violates CHECK constraint
+-- INSERT INTO flights (flight_no, airline_id, origin, destination, departure, arrival, base_fare, total_seats, seats_available)
+-- VALUES ('ERR001', 1, 'Delhi', 'Mumbai', '2025-03-05 10:00:00', '2025-03-05 12:00:00', -5000.00, 100, 100);
