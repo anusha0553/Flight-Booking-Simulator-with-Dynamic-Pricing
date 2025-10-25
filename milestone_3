@@ -1,0 +1,411 @@
+from datetime import datetime, timedelta
+import random
+import string
+import asyncio
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, status, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, func
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.exc import SQLAlchemyError
+from fastapi.middleware.cors import CORSMiddleware
+
+DATABASE_URL = "sqlite:///./flight_m3.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+Base = declarative_base()
+
+app = FastAPI(title="Flight Booking - Milestone 3: Booking Workflow & Transactions")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or restrict to ["http://127.0.0.1:5500"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class Flight(Base):
+    __tablename__ = "flights"
+    id = Column(Integer, primary_key=True, index=True)
+    flight_id = Column(String, unique=True, index=True, nullable=False)
+    airline_name = Column(String, nullable=False)
+    origin = Column(String, nullable=False)
+    destination = Column(String, nullable=False)
+    departure_time = Column(DateTime, nullable=False)
+    arrival_time = Column(DateTime, nullable=False)
+    base_fare = Column(Float, nullable=False)
+    total_seats = Column(Integer, nullable=False)
+    seats_available = Column(Integer, nullable=False)
+    airline_tier = Column(Integer, default=1)
+class Booking(Base):
+    __tablename__ = "bookings"
+    id = Column(Integer, primary_key=True, index=True)
+    pnr = Column(String, unique=True, index=True, nullable=False)
+    flight_id = Column(String, ForeignKey("flights.flight_id"), nullable=False)
+    passenger_name = Column(String, nullable=False)
+    passenger_age = Column(Integer, nullable=True)
+    passenger_phone = Column(String, nullable=True)
+    seat_no = Column(String, nullable=True)
+    price = Column(Float, nullable=False)
+    status = Column(String, default="PENDING")  # PENDING, CONFIRMED, CANCELLED, FAILED
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+class FareHistory(Base):
+    __tablename__ = "fare_history"
+    id = Column(Integer, primary_key=True)
+    flight_id = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    price = Column(Float, nullable=False)
+Base.metadata.create_all(bind=engine)
+class FlightCreate(BaseModel):
+    flight_id: str
+    airline_name: str
+    origin: str
+    destination: str
+    departure_time: datetime
+    arrival_time: datetime
+    base_fare: float
+    total_seats: int
+    airline_tier: Optional[int] = 1
+
+class FlightOut(BaseModel):
+    flight_id: str
+    airline_name: str
+    origin: str
+    destination: str
+    departure_time: datetime
+    arrival_time: datetime
+    base_fare: float
+    total_seats: int
+    seats_available: int
+
+class PassengerInfo(BaseModel):
+    first_name: str
+    last_name: str
+    age: int
+    phone: str
+
+class StartReservationRequest(BaseModel):
+    flight_id: str
+    seat_no: Optional[str] = None
+    passenger: PassengerInfo
+
+class StartReservationResponse(BaseModel):
+    reservation_id: str = Field(..., description="temporary reservation id = PNR-like prefix + 'R'")
+    pnr: Optional[str] = None
+    status: str
+    seat_no: Optional[str]
+    price: float
+
+class ConfirmBookingRequest(BaseModel):
+    reservation_id: str
+    payment_token: Optional[str] = None  # simulated
+
+class CancelRequest(BaseModel):
+    pnr: str
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+def gen_pnr() -> str:
+    # 6 uppercase letters + digits
+    letters = ''.join(random.choices(string.ascii_uppercase, k=3))
+    nums = ''.join(random.choices(string.digits, k=4))
+    return f"PNR{letters}{nums}"
+def gen_reservation_id() -> str:
+    return "RSV" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+def calculate_dynamic_price(base_fare: float, seats_available: int, total_seats: int,
+                            departure_time: datetime, demand_index: float = 1.0, airline_tier: int = 1) -> float:
+    import math
+    seats_left_ratio = seats_available / max(total_seats, 1)
+    seat_factor = 0.6 * (1 - math.sqrt(max(0.0, seats_left_ratio)))
+    now = datetime.utcnow()
+    days_until = max(0, (departure_time - now).days)
+    if days_until <= 0:
+        time_factor = 0.6
+    elif days_until <= 3:
+        time_factor = 0.4
+    elif days_until <= 7:
+        time_factor = 0.2
+    elif days_until <= 30:
+        time_factor = 0.05
+    else:
+        time_factor = 0.0
+    tier_premium = 0.05 * (airline_tier - 1)
+    total_factor = 1.0 + seat_factor + time_factor + (demand_index - 1.0) + tier_premium
+    total_factor = max(0.5, min(total_factor, 4.0))
+    return round(base_fare * total_factor, 2)
+
+@app.post("/admin/flights", response_model=FlightOut, status_code=status.HTTP_201_CREATED)
+def add_flight(payload: FlightCreate, db: Session = Depends(get_db)):
+    existing = db.query(Flight).filter(Flight.flight_id == payload.flight_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Flight with this flight_id already exists")
+    flight = Flight(
+        flight_id=payload.flight_id,
+        airline_name=payload.airline_name,
+        origin=payload.origin,
+        destination=payload.destination,
+        departure_time=payload.departure_time,
+        arrival_time=payload.arrival_time,
+        base_fare=payload.base_fare,
+        total_seats=payload.total_seats,
+        seats_available=payload.total_seats,
+        airline_tier=payload.airline_tier,
+    )
+    db.add(flight)
+    db.commit()
+    db.refresh(flight)
+    return FlightOut(
+        flight_id=flight.flight_id,
+        airline_name=flight.airline_name,
+        origin=flight.origin,
+        destination=flight.destination,
+        departure_time=flight.departure_time,
+        arrival_time=flight.arrival_time,
+        base_fare=flight.base_fare,
+        total_seats=flight.total_seats,
+        seats_available=flight.seats_available,
+    )
+
+@app.get("/flights", response_model=List[FlightOut])
+def list_flights(db: Session = Depends(get_db)):
+    rows = db.query(Flight).all()
+    return [
+        FlightOut(
+            flight_id=f.flight_id,
+            airline_name=f.airline_name,
+            origin=f.origin,
+            destination=f.destination,
+            departure_time=f.departure_time,
+            arrival_time=f.arrival_time,
+            base_fare=f.base_fare,
+            total_seats=f.total_seats,
+            seats_available=f.seats_available,
+        ) for f in rows
+    ]
+TEMP_RESERVATIONS = {}
+
+@app.post("/bookings/start", response_model=StartReservationResponse)
+def start_reservation(req: StartReservationRequest, db: Session = Depends(get_db)):
+    try:
+        conn = db.connection()
+        conn.execute("BEGIN IMMEDIATE")
+    except Exception:
+        pass
+    try:
+        flight = db.query(Flight).filter(Flight.flight_id == req.flight_id).with_for_update(nowait=True).first()
+    except Exception:
+        flight = db.query(Flight).filter(Flight.flight_id == req.flight_id).first()
+    if not flight:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="Flight not found")
+    if req.seat_no:
+        exists = db.query(Booking).filter(Booking.flight_id == req.flight_id, Booking.seat_no == req.seat_no, Booking.status.in_(["PENDING","CONFIRMED"])).first()
+        if exists:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Requested seat already taken")
+    if flight.seats_available <= 0:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No seats available")
+    flight.seats_available -= 1
+    price = calculate_dynamic_price(flight.base_fare, flight.seats_available, flight.total_seats, flight.departure_time, airline_tier=flight.airline_tier)
+    reservation_id = gen_reservation_id()
+    TEMP_RESERVATIONS[reservation_id] = {
+        "flight_id": req.flight_id,
+        "seat_no": req.seat_no,
+        "passenger": req.passenger.dict(),
+        "price": price,
+        "created_at": datetime.utcnow()
+    }
+    try:
+        db.add(flight)
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        TEMP_RESERVATIONS.pop(reservation_id, None)
+        raise HTTPException(status_code=500, detail="Could not reserve seat")
+    return StartReservationResponse(reservation_id=reservation_id, pnr=None, status="RESERVED", seat_no=req.seat_no, price=price)
+
+@app.post("/bookings/confirm")
+def confirm_booking(req: ConfirmBookingRequest, db: Session = Depends(get_db)):
+    res = TEMP_RESERVATIONS.get(req.reservation_id)
+    if not res:
+        raise HTTPException(status_code=404, detail="Reservation not found or expired")
+    payment_success = random.random() < 0.85
+
+    if not payment_success:
+        try:
+            flight = db.query(Flight).filter(Flight.flight_id == res["flight_id"]).first()
+            if flight:
+                flight.seats_available += 1
+                db.add(flight)
+                db.commit()
+        except Exception:
+            db.rollback()
+        TEMP_RESERVATIONS.pop(req.reservation_id, None)
+        return {"status": "FAILED", "message": "Payment failed"}
+    pnr = gen_pnr()
+    passenger = res["passenger"]
+    booking = Booking(
+        pnr=pnr,
+        flight_id=res["flight_id"],
+        passenger_name=f"{passenger['first_name']} {passenger['last_name']}",
+        passenger_age=passenger.get("age"),
+        passenger_phone=passenger.get("phone"),
+        seat_no=res.get("seat_no"),
+        price=res["price"],
+        status="CONFIRMED",
+    )
+    try:
+        db.add(booking)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create booking")
+    fh = FareHistory(flight_id=res["flight_id"], price=res["price"])
+    db.add(fh)
+    db.commit()
+    TEMP_RESERVATIONS.pop(req.reservation_id, None)
+    return {"status": "CONFIRMED", "pnr": pnr, "price": res["price"]}
+
+@app.post("/bookings/cancel")
+def cancel_booking(req: CancelRequest, db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.pnr == req.pnr).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status == "CANCELLED":
+        return {"status": "ALREADY_CANCELLED"}
+    try:
+        booking.status = "CANCELLED"
+        db.add(booking)
+        flight = db.query(Flight).filter(Flight.flight_id == booking.flight_id).first()
+        if flight:
+            flight.seats_available += 1
+            db.add(flight)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to cancel booking")
+    return {"status": "CANCELLED", "pnr": req.pnr}
+
+@app.get("/bookings/history/{pnr}")
+def booking_history(pnr: str, db: Session = Depends(get_db)):
+    booking = db.query(Booking).filter(Booking.pnr == pnr).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return {
+        "pnr": booking.pnr,
+        "flight_id": booking.flight_id,
+        "passenger_name": booking.passenger_name,
+        "seat_no": booking.seat_no,
+        "price": booking.price,
+        "status": booking.status,
+        "created_at": booking.created_at.isoformat()
+    }
+
+@app.get("/bookings/by_flight/{flight_id}")
+def bookings_by_flight(flight_id: str, db: Session = Depends(get_db)):
+    rows = db.query(Booking).filter(Booking.flight_id == flight_id).all()
+    return [
+        {"pnr": b.pnr, "passenger": b.passenger_name, "seat": b.seat_no, "status": b.status} for b in rows
+    ]
+@app.get("/health")
+def health(db: Session = Depends(get_db)):
+    total_flights = db.query(Flight).count()
+    total_bookings = db.query(Booking).count()
+    return {"status": "healthy", "total_flights": total_flights, "total_bookings": total_bookings}
+async def simulate_market_step():
+    db = SessionLocal()
+    try:
+        flights = db.query(Flight).all()
+        for f in flights:
+            new_price = calculate_dynamic_price(f.base_fare, f.seats_available, f.total_seats, f.departure_time, airline_tier=f.airline_tier)
+            fh = FareHistory(flight_id=f.flight_id, price=new_price)
+            db.add(fh)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+@app.on_event("startup")
+async def startup_simulator():
+    app.state._sim_task = asyncio.create_task(_periodic_task())
+@app.on_event("shutdown")
+async def shutdown_simulator():
+    task = getattr(app.state, "_sim_task", None)
+    if task:
+        task.cancel()
+async def _periodic_task():
+    while True:
+        await simulate_market_step()
+        await asyncio.sleep(60)
+def add_sample_flights():
+    db = SessionLocal()
+    try:
+        existing = db.query(Flight).count()
+        if existing == 0:
+            sample_flights = [
+                {
+                    "flight_id": "AI102",
+                    "airline_name": "Air India",
+                    "origin": "Chennai",
+                    "destination": "Delhi",
+                    "departure_time": datetime(2025, 10, 25, 9, 0),
+                    "arrival_time": datetime(2025, 10, 25, 12, 0),
+                    "base_fare": 5500,
+                    "total_seats": 120,
+                    "airline_tier": 1
+                },
+                {
+                    "flight_id": "IG103",
+                    "airline_name": "IndiGo",
+                    "origin": "Bangalore",
+                    "destination": "Hyderabad",
+                    "departure_time": datetime(2025, 10, 26, 7, 30),
+                    "arrival_time": datetime(2025, 10, 26, 9, 0),
+                    "base_fare": 4200,
+                    "total_seats": 100,
+                    "airline_tier": 1
+                },
+                {
+                    "flight_id": "SG104",
+                    "airline_name": "SpiceJet",
+                    "origin": "Mumbai",
+                    "destination": "Goa",
+                    "departure_time": datetime(2025, 10, 27, 10, 0),
+                    "arrival_time": datetime(2025, 10, 27, 11, 30),
+                    "base_fare": 3500,
+                    "total_seats": 80,
+                    "airline_tier": 1
+                }
+            ]
+            for f in sample_flights:
+                flight = Flight(
+                    flight_id=f["flight_id"],
+                    airline_name=f["airline_name"],
+                    origin=f["origin"],
+                    destination=f["destination"],
+                    departure_time=f["departure_time"],
+                    arrival_time=f["arrival_time"],
+                    base_fare=f["base_fare"],
+                    total_seats=f["total_seats"],
+                    seats_available=f["total_seats"],
+                    airline_tier=f["airline_tier"]
+                )
+                db.add(flight)
+            db.commit()
+            print("Sample flights added to DB")
+    except Exception as e:
+        db.rollback()
+        print("Failed to add sample flights:", e)
+    finally:
+        db.close()
+add_sample_flights()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("fastapi_milestone3:app", host="127.0.0.1", port=8000, reload=True)
