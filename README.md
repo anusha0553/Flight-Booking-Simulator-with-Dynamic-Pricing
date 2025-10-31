@@ -1,0 +1,1 @@
+This project simulates an airline ticket booking system that adjusts flight price dynamically based on demand,time and availability. It demonstrates real world pricing stragies using data driven algorithms for an interactive booking experience.
